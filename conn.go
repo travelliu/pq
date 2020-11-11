@@ -114,12 +114,14 @@ func (d defaultDialer) DialContext(ctx context.Context, network, address string)
 }
 
 type conn struct {
-	c         net.Conn
-	buf       *bufio.Reader
-	namei     int
-	scratch   [512]byte
-	txnStatus transactionStatus
-	txnFinish func()
+	c                 net.Conn
+	buf               *bufio.Reader
+	namei             int
+	scratch           []byte
+	minReadBufferSize int64
+	cpBufferSize      int64
+	txnStatus         transactionStatus
+	txnFinish         func()
 
 	// Save connection arguments to use during CancelRequest.
 	dialer Dialer
@@ -284,7 +286,6 @@ func DialOpen(d Dialer, dsn string) (_ driver.Conn, err error) {
 	c.dialer = d
 	return c.open(context.Background())
 }
-
 func (c *Connector) open(ctx context.Context) (cn *conn, err error) {
 	// Handle any panics during connection initialization.  Note that we
 	// specifically do *not* want to use errRecover(), as that would turn any
@@ -294,10 +295,35 @@ func (c *Connector) open(ctx context.Context) (cn *conn, err error) {
 
 	o := c.opts
 
+	hander := func(s string, val *int64, def int64) error {
+		var bufferSize int64
+		var err error
+		if minReadBuffer, ok := o[s]; !ok {
+			bufferSize = def
+		} else {
+			bufferSize, err = strconv.ParseInt(minReadBuffer, 10, 32)
+			if err != nil {
+				return fmt.Errorf("cannot parse %s", s, err)
+			}
+			delete(o, s)
+		}
+		*val = bufferSize
+
+		return nil
+	}
+
 	cn = &conn{
 		opts:   o,
 		dialer: c.dialer,
 	}
+	if err := hander("min_read_buffer_size", &cn.minReadBufferSize, 8192); err != nil {
+		return nil, err
+	}
+	if err := hander("cp_buffer_size", &cn.cpBufferSize, 1024*1024); err != nil {
+		return nil, err
+	}
+	cn.scratch = make([]byte, cn.minReadBufferSize)
+
 	err = cn.handleDriverSettings(o)
 	if err != nil {
 		return nil, err
@@ -1074,9 +1100,9 @@ func isDriverSetting(key string) bool {
 		return true
 	case "binary_parameters":
 		return true
-	case "krbsrvname":
+	case "service":
 		return true
-	case "krbspn":
+	case "spn":
 		return true
 	default:
 		return false
@@ -1168,13 +1194,13 @@ func (cn *conn) auth(r *readBuf, o values) {
 
 		var token []byte
 
-		if spn, ok := o["krbspn"]; ok {
+		if spn, ok := o["spn"]; ok {
 			// Use the supplied SPN if provided..
 			token, err = cli.GetInitTokenFromSpn(spn)
 		} else {
 			// Allow the kerberos service name to be overridden
 			service := "postgres"
-			if val, ok := o["krbsrvname"]; ok {
+			if val, ok := o["service"]; ok {
 				service = val
 			}
 

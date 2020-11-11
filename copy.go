@@ -49,7 +49,6 @@ type copyin struct {
 	buffer  []byte
 	rowData chan []byte
 	done    chan bool
-	driver.Result
 
 	closed bool
 
@@ -57,10 +56,10 @@ type copyin struct {
 	err        error
 }
 
-const ciBufferSize = 64 * 1024
+const ciBufferSize = 1025 * 1024
 
 // flush buffer before the buffer is filled up and needs reallocation
-const ciBufferFlushSize = 63 * 1024
+const ciBufferFlushSize = 1024 * 1024
 
 func (cn *conn) prepareCopyIn(q string) (_ driver.Stmt, err error) {
 	if !cn.isInTransaction() {
@@ -68,8 +67,8 @@ func (cn *conn) prepareCopyIn(q string) (_ driver.Stmt, err error) {
 	}
 
 	ci := &copyin{
-		cn:      cn,
-		buffer:  make([]byte, 0, ciBufferSize),
+		cn: cn,
+		// buffer:  []nu,
 		rowData: make(chan []byte),
 		done:    make(chan bool, 1),
 	}
@@ -152,8 +151,6 @@ func (ci *copyin) resploop() {
 		switch t {
 		case 'C':
 			// complete
-			res, _ := ci.cn.parseComplete(r.string())
-			ci.setResult(res)
 		case 'N':
 			if n := ci.cn.noticeHandler; n != nil {
 				n(parseError(&r))
@@ -204,22 +201,6 @@ func (ci *copyin) setError(err error) {
 	ci.Unlock()
 }
 
-func (ci *copyin) setResult(result driver.Result) {
-	ci.Lock()
-	ci.Result = result
-	ci.Unlock()
-}
-
-func (ci *copyin) getResult() driver.Result {
-	ci.Lock()
-	result := ci.Result
-	ci.Unlock()
-	if result == nil {
-		return driver.RowsAffected(0)
-	}
-	return result
-}
-
 func (ci *copyin) NumInput() int {
 	return -1
 }
@@ -250,11 +231,7 @@ func (ci *copyin) Exec(v []driver.Value) (r driver.Result, err error) {
 	}
 
 	if len(v) == 0 {
-		if err := ci.Close(); err != nil {
-			return driver.RowsAffected(0), err
-		}
-
-		return ci.getResult(), nil
+		return driver.RowsAffected(0), ci.Close()
 	}
 
 	numValues := len(v)
@@ -267,7 +244,7 @@ func (ci *copyin) Exec(v []driver.Value) (r driver.Result, err error) {
 
 	ci.buffer = append(ci.buffer, '\n')
 
-	if len(ci.buffer) > ciBufferFlushSize {
+	if len(ci.buffer) > int(ci.cn.cpBufferSize) {
 		ci.flush(ci.buffer)
 		// reset buffer, keep bytes for message identifier and length
 		ci.buffer = ci.buffer[:5]
