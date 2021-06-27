@@ -139,8 +139,9 @@ func (cn *conn) cancel(ctx context.Context) error {
 		bad := &atomic.Value{}
 		bad.Store(false)
 		can := conn{
-			c:   c,
-			bad: bad,
+			c:       c,
+			bad:     bad,
+			scratch: make([]byte, cn.minReadBufferSize),
 		}
 		err = can.ssl(cn.opts)
 		if err != nil {
